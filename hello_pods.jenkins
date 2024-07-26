@@ -20,7 +20,7 @@ inPod(pod) {
     stage('Checkout') {
         dir('src') {
             checkout scm
-            ./hello.sh
+            sh './hello.sh'
         }
     }
 }
