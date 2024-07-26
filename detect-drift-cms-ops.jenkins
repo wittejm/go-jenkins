@@ -1,0 +1,188 @@
+@Library('corbalt') _
+
+properties([
+    parameters([
+        string(
+            name: 'BRANCH',
+            description: 'Branch to detect drift from',
+            defaultValue: 'master'
+        ),
+        string(
+            name: 'EMAIL_NOTIFICATIONS_RECIPIENTS',
+            description: 'Whitespace-delimited list of emails to notify on failure',
+            defaultValue: 'cms-wds-archive@corbalt.com'
+        ),
+    ])
+])
+
+def pod = [
+    containers: [
+        containerTemplate(name: 'aws', image: 'artifactory.cms.gov/geoapi-jenkins-core-docker-local/amazon/aws-cli', ttyEnabled: true, command: 'cat'),
+        containerTemplate(name: 'alpine', image: 'artifactory.cms.gov/geoapi-jenkins-core-docker-local/alpine:3', ttyEnabled: true, command: 'cat'),
+        containerTemplate(name: 'terraform', image: 'artifactory.cms.gov/geoapi-jenkins-core-docker-local/hashicorp/terraform:1.0.5', ttyEnabled: true, command: 'cat'),
+    ],
+    serviceAccount: 'prod-jenkins-core-assumerole',
+    nodeSelector: 'Agents=true'
+]
+
+workspaces = [
+    "cms-ops/common/terraform/apim-geo/init": "331698725649",
+    "cms-ops/common/terraform/apim-geo": "331698725649",
+
+    "cms-ops/devportal/terraform/test": "331698725649",
+    "cms-ops/devportal/terraform/impl": "331698725649",
+    "cms-ops/devportal/terraform/prod": "331698725649",
+
+    "cms-ops/kong/terraform/test": "331698725649",
+    "cms-ops/kong/terraform/impl": "331698725649",
+    "cms-ops/kong/terraform/prod": "331698725649",
+
+    "cms-ops/common/terraform/adp-test/init": "696910373521",
+    "cms-ops/common/terraform/adp-test": "696910373521",
+    "cms-ops/adp/terraform/test": "696910373521",
+    "cms-ops/common/terraform/adp-impl/init": "939206537900",
+    "cms-ops/common/terraform/adp-impl": "939206537900",
+    "cms-ops/adp/terraform/impl": "939206537900",
+    "cms-ops/common/terraform/adp-prod/init": "955329939644",
+    "cms-ops/common/terraform/adp-prod": "955329939644",
+    "cms-ops/adp/terraform/prod": "955329939644",
+
+    "cms-ops/common/terraform/geoapi-test/init": "295759611869",
+    "cms-ops/common/terraform/geoapi-test": "295759611869",
+    "cms-ops/geoapi/terraform/test": "295759611869",
+    "cms-ops/common/terraform/geoapi-impl/init": "082516379379",
+    "cms-ops/common/terraform/geoapi-impl": "082516379379",
+    "cms-ops/geoapi/terraform/impl": "082516379379",
+    "cms-ops/common/terraform/geoapi-prod/init": "444102955479",
+    "cms-ops/common/terraform/geoapi-prod": "444102955479",
+    "cms-ops/geoapi/terraform/prod": "444102955479",
+
+    "cms-ops/common/terraform/smarty-test/init": "030984950441",
+    "cms-ops/common/terraform/smarty-test": "030984950441",
+    "cms-ops/smarty/terraform/test": "030984950441",
+    "cms-ops/common/terraform/smarty-impl/init": "637348866251",
+    "cms-ops/common/terraform/smarty-impl": "637348866251",
+    "cms-ops/smarty/terraform/impl": "637348866251",
+    "cms-ops/common/terraform/smarty-prod/init": "704834707962",
+    "cms-ops/common/terraform/smarty-prod": "704834707962",
+    "cms-ops/smarty/terraform/prod": "704834707962",
+
+    "cms-ops/common/terraform/pdf-test/init": "732791522975",
+    "cms-ops/common/terraform/pdf-test": "732791522975",
+    "cms-ops/pdf-generator/terraform/test": "732791522975",
+    "cms-ops/common/terraform/pdf-impl/init": "164798704043",
+    "cms-ops/common/terraform/pdf-impl": "164798704043",
+    "cms-ops/pdf-generator/terraform/impl": "164798704043",
+    "cms-ops/common/terraform/pdf-prod/init": "339392366525",
+    "cms-ops/common/terraform/pdf-prod": "339392366525",
+    "cms-ops/pdf-generator/terraform/prod": "339392366525",
+]
+
+corbalt.inPod(pod) {
+    corbalt.notify(to: params.EMAIL_NOTIFICATIONS_RECIPIENTS?.tokenize(), onSuccess: false) {
+        stage('Checkout') {
+            dir('cms-ops') {
+                checkout scm
+            }
+        }
+
+        stage('Terraform Plan') {
+            workspaces.each { workspace, accountId ->
+                def terraformStatus
+                def creds = [
+                    string(credentialsId: 'dd-akamai-dns-client-secret', variable: 'AKAMAI_CLIENT_SECRET'),
+                    string(credentialsId: 'dd-akamai-dns-access-token', variable: 'AKAMAI_ACCESS_TOKEN'),
+                    string(credentialsId: 'dd-akamai-dns-client-token', variable: 'AKAMAI_CLIENT_TOKEN'),
+                    string(credentialsId: 'dd-akamai-dns-host', variable: 'AKAMAI_HOST'),
+                    string(credentialsId: 'dd-newrelic-api-key', variable: 'NEW_RELIC_API_KEY'),
+                ]
+
+                container('terraform') {
+                    withEnv(corbalt.getIamRoleEnv("arn:aws:iam::${accountId}:role/delegatedadmin/developer/detect-drift")) {
+                        dir(workspace) {
+                            withCredentials(creds) {
+                                withEnv([
+                                    "CLIENT_SECRET=${AKAMAI_CLIENT_SECRET}",
+                                    "ACCESS_TOKEN=${AKAMAI_ACCESS_TOKEN}",
+                                    "CLIENT_TOKEN=${AKAMAI_CLIENT_TOKEN}",
+                                    "HOST=${AKAMAI_HOST}",
+                                ]) {
+                                    terraformStatus = sh(script: """\
+                                        set -e
+                                        terraform init -no-color &> output
+                                        terraform plan -detailed-exitcode -no-color -out plan &> output
+                                    """.stripIndent(), returnStatus: true)
+                                }
+                            }
+                        }
+                    }
+                }
+
+                switch (terraformStatus) {
+                case 0: // No diff, no error
+                    break
+                case 1: // Terraform error
+                    def body
+
+                    dir(workspace) {
+                        body = """Pipeline encounted a terraform error in $workspace:
+                        ${readFile("output")}""".stripIndent()
+                    }
+
+                    mail(
+                        subject: "Terraform error detected",
+                        to: params.EMAIL_NOTIFICATIONS_RECIPIENTS,
+                        body: body,
+                    )
+                    break
+                case 2: // Terraform diff
+                    def terraformDiff
+
+                    container('terraform') {
+                        withEnv(corbalt.getIamRoleEnv("arn:aws:iam::${accountId}:role/delegatedadmin/developer/detect-drift")) {
+                            dir(workspace) {
+                                withCredentials(creds) {
+                                    writeFile(
+                                        file: "plan.json",
+                                        text: sh(
+                                            script: "terraform show -json plan",
+                                            returnStdout: true
+                                        )
+                                    )
+                                    terraformDiff = sh(
+                                        script: "terraform show -no-color plan",
+                                        returnStdout: true
+                                    )
+                                }
+                            }
+                        }
+                    }
+
+                    container('alpine') {
+                        sh 'apk add jq'
+
+                        dir(workspace) {
+                            def changes = sh(
+                                script: "jq -e '.resource_changes[].change.actions[] | select(. != \"no-op\")' plan.json",
+                                returnStatus: true
+                            )
+
+                            if (changes == 0) {
+                                body = """Pipeline detected drift in $workspace:
+                                $terraformDiff""".stripIndent()
+
+                                mail(
+                                    subject: "Drift detected",
+                                    to: params.EMAIL_NOTIFICATIONS_RECIPIENTS,
+                                    body: body,
+                                )
+                            }
+                        }
+                    }
+
+                    break
+                }
+            }
+        }
+    }
+}
