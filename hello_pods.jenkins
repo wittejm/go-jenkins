@@ -1,0 +1,26 @@
+void inPod(Map podParams = [:], Closure body) {
+    podTemplate(podParams) {
+        node(POD_LABEL) {
+            body()
+        }
+    }
+}
+
+def pod = [
+    containers: [
+        containerTemplate(name: 'aws', image: 'artifactory.cms.gov/geoapi-jenkins-core-docker-local/amazon/aws-cli', ttyEnabled: true, command: 'cat'),
+        containerTemplate(name: 'alpine', image: 'artifactory.cms.gov/geoapi-jenkins-core-docker-local/alpine:3', ttyEnabled: true, command: 'cat'),
+        containerTemplate(name: 'terraform', image: 'artifactory.cms.gov/geoapi-jenkins-core-docker-local/hashicorp/terraform:1.0.5', ttyEnabled: true, command: 'cat'),
+    ],
+    serviceAccount: 'prod-jenkins-core-assumerole',
+    nodeSelector: 'Agents=true'
+]
+
+inPod(pod) {
+    stage('Checkout') {
+        dir('src') {
+            checkout scm
+            ./hello.sh
+        }
+    }
+}
