@@ -1,30 +1,14 @@
 pipeline {
     agent {
-        kubernetes {
-            label 'hello-world-pod'
-            defaultContainer 'jnlp'
-            yaml """
-apiVersion: v1
-kind: Pod
-metadata:
-  labels:
-    some-label: hello-world
-spec:
-  containers:
-  - name: hello-world-container
-    image: alpine:3
-    command:
-    - cat
-    tty: true
-"""
+        docker {
+            image 'alpine:3'
+            args '-v /var/run/docker.sock:/var/run/docker.sock'
         }
     }
     stages {
         stage('Hello World') {
             steps {
-                container('hello-world-container') {
-                    sh 'echo "Hello, World!"'
-                }
+                sh 'echo "Hello, World!"'
             }
         }
     }
